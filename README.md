@@ -43,7 +43,9 @@
 ```kotlin
 // build.gradle.kts (app module)
 dependencies {
-    implementation("org.conscrypt:conscrypt-android:2.5.2")   // Conscrypt 提供 ECH
+    implementation("org.conscrypt:conscrypt-android:2.7.0")   // ECH 支持是 2.7.0（2026-08-31）加入的：
+                                                                   // EchOptions / EchRejectedException / Conscrypt.setEchConfigList(SSLSocket, ByteArray)
+                                                                   // 2.5.x 的 AAR 里没有 ECH 类，别用
     implementation("com.squareup.okhttp3:okhttp:4.12.0")      // 转发 HTTP 客户端
 }
 // AndroidManifest.xml：INTERNET 权限（正常 App 都有）
@@ -54,9 +56,9 @@ dependencies {
 
 | 文件 | 职责 | 要点 |
 |---|---|---|
-| `ConscryptEch.kt` | 注册 Conscrypt Provider + ECH 强制策略 | ECH 策略 `REQUIRED`（无配置就报错，绝不空转）；通过自定义 TrustManager 的 `getNetworkSecurityPolicy()` 注入（Conscrypt 反射读取） |
+| `ConscryptEch.kt` | 注册 Conscrypt Provider + ECH 强制策略 | ECH 策略 `REQUIRED`（无配置就报错，绝不空转）；TrustManager 暴露 `getNetworkSecurityPolicy()` 返回 `org.conscrypt.NetworkSecurityPolicy`，Conscrypt 2.7.0 的 TrustManagerImpl/SSLParametersImpl 反射读取它，按 host 查 `getDomainEncryptionMode()` 决定是否强制 ECH |
 | `EchDoh.kt` | DoH 取 A 记录 + ECH 配置（dns-json） | 带缓存；多节点池轮询；**网关域名用内置 IP 直连**避免死循环；目标站 CNAME 到 Cloudflare 时可用内置 ECH 兜底 |
-| `EchSocketFactory.kt` | 为 OkHttp 提供 ECH SocketFactory | 每次新 TLS 连接时向回调取 ECH 配置，设置到 SSLParameters |
+| `EchSocketFactory.kt` | 为 OkHttp 提供 ECH SocketFactory | 每次新 TLS 连接时向回调取 ECH 配置（DoH HTTPS 记录的 ech=），握手前调 `Conscrypt.setEchConfigList(socket, configBytes)` 注入到底层 SSLParameters |
 | `EchHttp.kt` | OkHttp 客户端（Conscrypt ECH） | **GET 跟重定向 / POST 不跟**（手动读 Location）；CookieJar 与 WebView CookieManager 双向同步 |
 | `EchLocalProxy.kt` | 进程内本地代理（ServerSocket @127.0.0.1:8888） | 解析 HTTP 请求→ECH 转发→重写 Referer/302/HTML 链接→代理内 cookie store |
 | `EchInternalBrowserActivity.kt` | WebView 登录页 | 打开 127.0.0.1 地址；拦截 `ani://` 自定义 scheme 交给 App |
@@ -64,6 +66,10 @@ dependencies {
 ### 2.2 ConscryptEch.kt（注册 + ECH 策略）
 
 ```kotlin
+import org.conscrypt.Conscrypt
+import org.conscrypt.DomainEncryptionMode          // Conscrypt 2.7.0 自带的类，不是 android.security.*，也不是平台 API
+import org.conscrypt.NetworkSecurityPolicy         // 同上；取值 REQUIRED / ENABLED / OPPORTUNISTIC / DISABLED / UNKNOWN
+
 internal object ConscryptEch {
     fun ensureProvider() {
         if (Security.getProvider("Conscrypt") == null) {
@@ -293,7 +299,7 @@ private fun handleStartIntent(intent: Intent) {
 | 11 | 验证码图片/session 一致性 | 图片 GET 与 POST 的 cookie 不一致 → 验证码错 | 图片 GET 和 POST 必须带**同一个 cookie**（本方案 CookieManager 双向同步） |
 | 12 | Kotlin 编译：deprecation 当 error | `toHttpUrl` 未 import 编译失败 | 必须显式 `import okhttp3.HttpUrl.Companion.toHttpUrl` 后写 `url.toHttpUrl()` |
 | 13 | WebView 打开自定义 scheme（ani://） | `ERR_UNKNOWN_URL_SCHEME` | shouldOverrideUrlLoading 拦截 ani:// → 交给 App（App 注册 intent-filter 处理） |
-| 14 | ECH 策略不生效 | 请求直连（无 ECH）或全部报错 | Conscrypt Provider 必须插到 Security 第一位；TrustManager 必须暴露 `getNetworkSecurityPolicy()`；策略只对目标 host REQUIRED |
+| 14 | ECH 策略不生效 | 请求直连（无 ECH）或全部报错 | Conscrypt Provider 必须插到 Security 第一位；TrustManager 必须暴露 `getNetworkSecurityPolicy()`（返回 `org.conscrypt.NetworkSecurityPolicy`，2.7.0 自带）；策略只对目标 host REQUIRED |
 
 ---
 
